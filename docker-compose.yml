@@ -1,0 +1,12 @@
+services:
+  md-channel-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - md-channel-bot-data:/data
+
+volumes:
+  md-channel-bot-data:

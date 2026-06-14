@@ -1,0 +1,108 @@
+# Markdown Channel Bot
+
+把私聊发送给 bot 的 Markdown 内容转成 Telegram Bot API `sendRichMessage` 预览。确认后点击按钮，bot 会把同一份 Rich Message 发送到配置的频道；取消则丢弃草稿。
+
+## 功能
+
+- 只允许 `TELEGRAM_ALLOWED_USER_IDS` 中的用户使用。
+- 支持直接发送 Markdown 文本。
+- 支持上传 `.md`、`.markdown`、`.txt` 或 `text/*` 文件。
+- 使用 Telegram Bot API `sendRichMessage`，请求体中的 `rich_message.markdown` 会原样使用你的 Markdown。
+- 预览消息下方提供 `发送到频道` 和 `取消` 两个 inline keyboard 按钮。
+- 待确认草稿会持久化到 `/data/pending.json`，容器重启后仍可继续处理未过期草稿。
+
+## 配置
+
+复制配置模板：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```dotenv
+TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
+TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
+TELEGRAM_CHANNEL_ID=-1001234567890
+```
+
+说明：
+
+- `TELEGRAM_BOT_TOKEN`：从 BotFather 获取。
+- `TELEGRAM_ALLOWED_USER_IDS`：允许使用 bot 的 Telegram 用户 ID，逗号分隔。
+- `TELEGRAM_CHANNEL_ID`：目标频道 ID，例如 `-1001234567890`，也可以是公开频道用户名如 `@your_channel`。如果你拿到的是频道内部 ID `1234567890`，通常需要写成 `-1001234567890`。
+- `PENDING_TTL_SECONDS`：草稿有效期，默认 86400 秒。
+- `MAX_DOCUMENT_BYTES`：上传文件大小上限，默认 256 KiB。
+- `MAX_RICH_MESSAGE_CHARS`：Rich Message 字符数上限，默认 32768。
+
+目标频道需要把 bot 加为管理员，并授予发消息权限。
+
+## 安全
+
+- 不要提交 `.env`。仓库只提交 `.env.example`，真实 token 只保存在部署环境。
+- 如果 token 意外提交或泄露，立即去 BotFather revoke 旧 token 并生成新 token。
+- `TELEGRAM_ALLOWED_USER_IDS` 是发送入口白名单；不在白名单内的用户即使私聊 bot 也不会得到预览或发布能力。
+- `data/pending.json` 只保存待确认草稿，默认被 `.gitignore` 排除。
+
+## Docker 部署
+
+```bash
+docker compose up -d --build
+```
+
+查看日志：
+
+```bash
+docker compose logs -f md-channel-bot
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+## 发布到 GitHub
+
+提交前确认没有把真实配置带进去：
+
+```bash
+git status --short --ignored
+git check-ignore -v .env data/pending.json
+```
+
+首次推送：
+
+```bash
+git remote add origin https://github.com/cylllllll/TG_MD_Bot.git
+git branch -M main
+git push -u origin main
+```
+
+## 使用
+
+1. 用白名单用户私聊 bot。
+2. 直接发送 Markdown 文本，或上传 `.md` 文件。
+3. bot 返回 Rich Message 预览。
+4. 点击 `发送到频道` 发布到 `TELEGRAM_CHANNEL_ID`，或点击 `取消` 丢弃。
+
+## 本地运行
+
+```bash
+export PYTHONPATH=src
+export TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
+export TELEGRAM_ALLOWED_USER_IDS=123456789
+export TELEGRAM_CHANNEL_ID=-1001234567890
+python -m md_channel_bot
+```
+
+## 测试
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests
+```
+
+## API 参考
+
+实现使用的是 Telegram Bot API 的 long polling、`sendRichMessage`、inline keyboard callback 和 `answerCallbackQuery`。
