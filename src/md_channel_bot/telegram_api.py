@@ -65,6 +65,41 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         return self.request("sendRichMessage", payload)
 
+    def copy_message(
+        self,
+        chat_id: int | str,
+        from_chat_id: int | str,
+        message_id: int,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "from_chat_id": from_chat_id,
+            "message_id": message_id,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        result = self.request("copyMessage", payload)
+        if not isinstance(result, dict):
+            raise TelegramAPIError("copyMessage", None, "unexpected result type")
+        return result
+
+    def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        markdown: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | bool:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": {"markdown": markdown},
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self.request("editMessageText", payload)
+
     def edit_message_reply_markup(
         self,
         chat_id: int | str,

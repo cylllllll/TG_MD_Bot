@@ -3,15 +3,21 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import Settings
-from .store import PendingMessage, PendingStore
+from .store import EditSession, PendingMessage, PendingStore
 from .telegram_api import TelegramAPIError, TelegramClient
 
 logger = logging.getLogger(__name__)
 
 ACTION_SEND = "send"
 ACTION_CANCEL = "cancel"
+ACTION_BEGIN_EDIT = "edit"
+ACTION_UPDATE_EDIT = "update"
+ACTION_CANCEL_EDIT = "ecancel"
+EDIT_STAGE_CONFIRM = "confirm"
+EDIT_STAGE_AWAITING_CONTENT = "awaiting_content"
 
 
 class MarkdownChannelBot:
@@ -65,7 +71,7 @@ class MarkdownChannelBot:
 
         text = message.get("text")
         if isinstance(text, str) and text.startswith("/"):
-            self._handle_command(chat_id, text)
+            self._handle_command(chat_id, user_id, text)
             return
 
         try:
@@ -80,6 +86,11 @@ class MarkdownChannelBot:
                 f"内容过长：{len(markdown)} 字符，当前上限是 {self.settings.max_rich_message_chars}。",
                 reply_to_message_id=message_id,
             )
+            return
+
+        edit_session = self.store.get_active_edit_session(user_id, stage=EDIT_STAGE_AWAITING_CONTENT)
+        if edit_session is not None:
+            self._create_edit_preview(chat_id, message_id, edit_session, markdown)
             return
 
         pending = self.store.create(user_id, self.settings.channel_id, markdown)
@@ -115,6 +126,17 @@ class MarkdownChannelBot:
             self.client.answer_callback_query(callback_id, "操作已失效。", show_alert=True)
             return
 
+        if action in {ACTION_BEGIN_EDIT, ACTION_CANCEL_EDIT}:
+            self._handle_edit_session_callback(
+                callback_id=callback_id,
+                action=action,
+                session_id=draft_id,
+                user_id=user_id,
+                preview_chat_id=preview_chat_id,
+                preview_message_id=preview_message_id,
+            )
+            return
+
         pending = self.store.get(draft_id, user_id=user_id)
         if pending is None:
             self.client.answer_callback_query(callback_id, "草稿不存在或已过期。", show_alert=True)
@@ -126,31 +148,132 @@ class MarkdownChannelBot:
             self.client.answer_callback_query(callback_id, "已取消。")
             return
 
-        if action != ACTION_SEND:
-            self.client.answer_callback_query(callback_id, "未知操作。", show_alert=True)
+        if action == ACTION_SEND:
+            if pending.mode != "publish":
+                self.client.answer_callback_query(callback_id, "草稿类型不匹配。", show_alert=True)
+                return
+            try:
+                self._send_pending_to_channel(pending)
+            except TelegramAPIError as exc:
+                logger.warning("Failed to send pending message %s: %s", draft_id, exc)
+                self.client.answer_callback_query(callback_id, f"发送失败：{exc.description}", show_alert=True)
+                return
+
+            self.store.delete(draft_id)
+            self._remove_preview_buttons(preview_chat_id, preview_message_id)
+            self.client.answer_callback_query(callback_id, "已发送到频道。")
             return
 
-        try:
-            self._send_pending_to_channel(pending)
-        except TelegramAPIError as exc:
-            logger.warning("Failed to send pending message %s: %s", draft_id, exc)
-            self.client.answer_callback_query(callback_id, f"发送失败：{exc.description}", show_alert=True)
+        if action == ACTION_UPDATE_EDIT:
+            if pending.mode != "edit" or pending.target_message_id is None:
+                self.client.answer_callback_query(callback_id, "草稿类型不匹配。", show_alert=True)
+                return
+            try:
+                self._update_channel_message(pending)
+            except TelegramAPIError as exc:
+                logger.warning("Failed to update pending message %s: %s", draft_id, exc)
+                self.client.answer_callback_query(callback_id, f"更新失败：{exc.description}", show_alert=True)
+                return
+
+            self.store.delete(draft_id)
+            self._remove_preview_buttons(preview_chat_id, preview_message_id)
+            self.client.answer_callback_query(callback_id, "已更新频道消息。")
             return
 
-        self.store.delete(draft_id)
-        self._remove_preview_buttons(preview_chat_id, preview_message_id)
-        self.client.answer_callback_query(callback_id, "已发送到频道。")
+        self.client.answer_callback_query(callback_id, "未知操作。", show_alert=True)
 
-    def _handle_command(self, chat_id: int | str, text: str) -> None:
-        command = text.split(maxsplit=1)[0].split("@", maxsplit=1)[0].lower()
+    def _handle_command(self, chat_id: int | str, user_id: int, text: str) -> None:
+        command, argument = _split_command(text)
         if command in {"/start", "/help"}:
             self._safe_send_text(
                 chat_id,
                 "发送 Markdown 文本或 .md/.markdown/.txt 文件，我会用 sendRichMessage 生成预览。"
-                "确认无误后点击“发送到频道”，或点击“取消”。",
+                "确认无误后点击“发送到频道”，或点击“取消”。\n\n"
+                "编辑已发布消息：发送 /edit 频道消息链接 或 /edit 消息ID。",
             )
+        elif command == "/edit":
+            self._handle_edit_command(chat_id, user_id, argument)
         else:
             self._safe_send_text(chat_id, "未知命令。发送 /help 查看用法。")
+
+    def _handle_edit_command(self, chat_id: int | str, user_id: int, argument: str) -> None:
+        try:
+            target_message_id = _parse_edit_target(argument, self.settings.channel_id)
+        except UserFacingError as exc:
+            self._safe_send_text(chat_id, str(exc))
+            return
+
+        session = self.store.create_edit_session(user_id, self.settings.channel_id, target_message_id)
+        try:
+            self.client.copy_message(
+                chat_id=chat_id,
+                from_chat_id=self.settings.channel_id,
+                message_id=target_message_id,
+                reply_markup=_edit_keyboard(session.session_id),
+            )
+        except TelegramAPIError as exc:
+            self.store.delete_edit_session(session.session_id)
+            logger.warning("Failed to copy channel message %s: %s", target_message_id, exc)
+            self._safe_send_text(chat_id, f"读取频道消息失败：{exc.description}")
+
+    def _handle_edit_session_callback(
+        self,
+        callback_id: str,
+        action: str,
+        session_id: str,
+        user_id: int,
+        preview_chat_id: int | str | None,
+        preview_message_id: int | None,
+    ) -> None:
+        session = self.store.get_edit_session(session_id, user_id=user_id)
+        if session is None:
+            self.client.answer_callback_query(callback_id, "编辑会话不存在或已过期。", show_alert=True)
+            return
+
+        if action == ACTION_CANCEL_EDIT:
+            self.store.delete_edit_session(session_id)
+            self._remove_preview_buttons(preview_chat_id, preview_message_id)
+            self.client.answer_callback_query(callback_id, "已取消。")
+            return
+
+        if action != ACTION_BEGIN_EDIT:
+            self.client.answer_callback_query(callback_id, "未知操作。", show_alert=True)
+            return
+
+        updated = self.store.set_edit_session_stage(session_id, EDIT_STAGE_AWAITING_CONTENT)
+        if updated is None:
+            self.client.answer_callback_query(callback_id, "编辑会话不存在或已过期。", show_alert=True)
+            return
+        self._remove_preview_buttons(preview_chat_id, preview_message_id)
+        self.client.answer_callback_query(callback_id, "请发送新内容。")
+        self._safe_send_text(preview_chat_id or user_id, "请发送新内容来替换消息")
+
+    def _create_edit_preview(
+        self,
+        chat_id: int | str,
+        reply_to_message_id: int | None,
+        edit_session: EditSession,
+        markdown: str,
+    ) -> None:
+        pending = self.store.create(
+            user_id=edit_session.user_id,
+            channel_id=edit_session.channel_id,
+            markdown=markdown,
+            mode="edit",
+            target_message_id=edit_session.message_id,
+        )
+        try:
+            self.client.send_rich_message(
+                chat_id=chat_id,
+                markdown=markdown,
+                reply_markup=_update_keyboard(pending.draft_id),
+            )
+        except TelegramAPIError as exc:
+            self.store.delete(pending.draft_id)
+            logger.warning("Rich message edit preview failed: %s", exc)
+            self._safe_send_text(chat_id, f"Rich Message 预览失败：{exc.description}", reply_to_message_id=reply_to_message_id)
+            return
+        self.store.delete_edit_session(edit_session.session_id)
 
     def _extract_markdown(self, message: dict[str, Any]) -> str:
         text = message.get("text")
@@ -202,6 +325,15 @@ class MarkdownChannelBot:
             markdown=pending.markdown,
         )
 
+    def _update_channel_message(self, pending: PendingMessage) -> None:
+        if pending.target_message_id is None:
+            raise ValueError("target_message_id is required for edit drafts")
+        self.client.edit_message_text(
+            chat_id=pending.channel_id,
+            message_id=pending.target_message_id,
+            markdown=pending.markdown,
+        )
+
     def _remove_preview_buttons(self, chat_id: int | str | None, message_id: int | None) -> None:
         if chat_id is None or not isinstance(message_id, int):
             return
@@ -247,7 +379,13 @@ def _parse_callback_data(data: Any) -> tuple[str | None, str | None]:
     if not isinstance(data, str):
         return None, None
     action, separator, draft_id = data.partition(":")
-    if separator != ":" or action not in {ACTION_SEND, ACTION_CANCEL} or not draft_id:
+    if separator != ":" or action not in {
+        ACTION_SEND,
+        ACTION_CANCEL,
+        ACTION_BEGIN_EDIT,
+        ACTION_UPDATE_EDIT,
+        ACTION_CANCEL_EDIT,
+    } or not draft_id:
         return None, None
     return action, draft_id
 
@@ -263,8 +401,87 @@ def _approval_keyboard(draft_id: str) -> dict[str, Any]:
     }
 
 
+def _edit_keyboard(session_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "编辑", "callback_data": f"{ACTION_BEGIN_EDIT}:{session_id}", "style": "success"},
+                {"text": "取消", "callback_data": f"{ACTION_CANCEL_EDIT}:{session_id}", "style": "danger"},
+            ]
+        ]
+    }
+
+
+def _update_keyboard(draft_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "更新到频道", "callback_data": f"{ACTION_UPDATE_EDIT}:{draft_id}", "style": "success"},
+                {"text": "取消", "callback_data": f"{ACTION_CANCEL}:{draft_id}", "style": "danger"},
+            ]
+        ]
+    }
+
+
 def _looks_like_markdown_file(filename: str, mime_type: str) -> bool:
     lowered = filename.lower()
     if lowered.endswith((".md", ".markdown", ".txt")):
         return True
     return mime_type.startswith("text/")
+
+
+def _split_command(text: str) -> tuple[str, str]:
+    command, _, argument = text.partition(" ")
+    command = command.split("@", maxsplit=1)[0].lower()
+    return command, argument.strip()
+
+
+def _parse_edit_target(raw: str, configured_channel_id: int | str) -> int:
+    target = raw.strip()
+    if not target:
+        raise UserFacingError("用法：/edit 频道消息链接 或 /edit 消息ID")
+    if target.isdecimal():
+        return _parse_message_id(target)
+
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in {"t.me", "telegram.me"}:
+        raise UserFacingError("无法识别消息地址。请发送频道消息链接，或直接发送消息 ID。")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if path_parts and path_parts[0] == "s":
+        path_parts = path_parts[1:]
+
+    if len(path_parts) >= 3 and path_parts[0] == "c":
+        if not _matches_private_channel_link(configured_channel_id, path_parts[1]):
+            raise UserFacingError("消息链接所属频道与当前配置频道不一致。")
+        return _parse_message_id(path_parts[2])
+
+    if len(path_parts) >= 2:
+        if isinstance(configured_channel_id, str) and configured_channel_id.startswith("@"):
+            configured_username = configured_channel_id[1:].lower()
+            if path_parts[0].lower() != configured_username:
+                raise UserFacingError("消息链接所属频道与当前配置频道不一致。")
+        return _parse_message_id(path_parts[1])
+
+    raise UserFacingError("无法从消息链接中解析消息 ID。")
+
+
+def _parse_message_id(raw: str) -> int:
+    try:
+        message_id = int(raw)
+    except ValueError as exc:
+        raise UserFacingError("消息 ID 必须是数字。") from exc
+    if message_id <= 0:
+        raise UserFacingError("消息 ID 必须大于 0。")
+    return message_id
+
+
+def _matches_private_channel_link(configured_channel_id: int | str, internal_id: str) -> bool:
+    if not internal_id.isdecimal():
+        return False
+    if isinstance(configured_channel_id, int):
+        configured = str(abs(configured_channel_id))
+        if configured.startswith("100"):
+            configured = configured[3:]
+        return configured == internal_id
+    return False

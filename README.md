@@ -9,6 +9,7 @@
 - 支持上传 `.md`、`.markdown`、`.txt` 或 `text/*` 文件。
 - 使用 Telegram Bot API `sendRichMessage`，请求体中的 `rich_message.markdown` 会原样使用你的 Markdown。
 - 预览消息下方提供 `发送到频道` 和 `取消` 两个 inline keyboard 按钮。
+- 支持用 `/edit` 编辑已经由 bot 发到频道的 Rich Message，更新时调用 Telegram Bot API `editMessageText` 的 `rich_message` 参数。
 - 待确认草稿会持久化到 `/data/pending.json`，容器重启后仍可继续处理未过期草稿。
 
 ## 配置
@@ -82,10 +83,37 @@ git push -u origin main
 
 ## 使用
 
+### 发布新消息
+
 1. 用白名单用户私聊 bot。
 2. 直接发送 Markdown 文本，或上传 `.md` 文件。
 3. bot 返回 Rich Message 预览。
 4. 点击 `发送到频道` 发布到 `TELEGRAM_CHANNEL_ID`，或点击 `取消` 丢弃。
+
+### 编辑频道消息
+
+消息必须是 bot 有权限访问并且可编辑的频道消息；通常也需要是这个 bot 发送的消息。
+
+支持两种写法：
+
+```text
+/edit 123
+/edit https://t.me/c/1326206584/123
+```
+
+也支持公开频道链接：
+
+```text
+/edit https://t.me/your_channel/123
+```
+
+流程：
+
+1. bot 复制这条频道消息到私聊，并在下方显示 `编辑` 和 `取消`。
+2. 点击 `编辑` 后，bot 提示 `请发送新内容来替换消息`。
+3. 发送新的 Markdown 文本或 `.md` 文件。
+4. bot 返回 Rich Message 预览。
+5. 点击 `更新到频道` 后，bot 使用 `editMessageText` 更新原频道消息；点击 `取消` 则丢弃本次编辑草稿。
 
 ## 本地运行
 

@@ -16,6 +16,18 @@ class PendingMessage:
     channel_id: int | str
     markdown: str
     created_at: float
+    mode: str = "publish"
+    target_message_id: int | None = None
+
+
+@dataclass(frozen=True)
+class EditSession:
+    session_id: str
+    user_id: int
+    channel_id: int | str
+    message_id: int
+    stage: str
+    created_at: float
 
 
 class PendingStore:
@@ -23,10 +35,18 @@ class PendingStore:
         self.path = Path(path)
         self.ttl_seconds = ttl_seconds
         self._items: dict[str, PendingMessage] = {}
+        self._edit_sessions: dict[str, EditSession] = {}
         self._load()
         self.cleanup()
 
-    def create(self, user_id: int, channel_id: int | str, markdown: str) -> PendingMessage:
+    def create(
+        self,
+        user_id: int,
+        channel_id: int | str,
+        markdown: str,
+        mode: str = "publish",
+        target_message_id: int | None = None,
+    ) -> PendingMessage:
         self.cleanup()
         draft_id = secrets.token_urlsafe(12)
         item = PendingMessage(
@@ -35,6 +55,8 @@ class PendingStore:
             channel_id=channel_id,
             markdown=markdown,
             created_at=time.time(),
+            mode=mode,
+            target_message_id=target_message_id,
         )
         self._items[draft_id] = item
         self._save()
@@ -57,15 +79,101 @@ class PendingStore:
             self._save()
         return removed
 
+    def create_edit_session(self, user_id: int, channel_id: int | str, message_id: int) -> EditSession:
+        self.cleanup()
+        self.clear_user_edit_sessions(user_id)
+        session_id = secrets.token_urlsafe(12)
+        session = EditSession(
+            session_id=session_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            message_id=message_id,
+            stage="confirm",
+            created_at=time.time(),
+        )
+        self._edit_sessions[session_id] = session
+        self._save()
+        return session
+
+    def get_edit_session(
+        self,
+        session_id: str,
+        user_id: int | None = None,
+        stage: str | None = None,
+    ) -> EditSession | None:
+        session = self._edit_sessions.get(session_id)
+        if session is None:
+            return None
+        if self._is_expired(session):
+            self.delete_edit_session(session_id)
+            return None
+        if user_id is not None and session.user_id != user_id:
+            return None
+        if stage is not None and session.stage != stage:
+            return None
+        return session
+
+    def get_active_edit_session(self, user_id: int, stage: str | None = None) -> EditSession | None:
+        self.cleanup()
+        sessions = [
+            session
+            for session in self._edit_sessions.values()
+            if session.user_id == user_id and (stage is None or session.stage == stage)
+        ]
+        if not sessions:
+            return None
+        return max(sessions, key=lambda session: session.created_at)
+
+    def set_edit_session_stage(self, session_id: str, stage: str) -> EditSession | None:
+        session = self.get_edit_session(session_id)
+        if session is None:
+            return None
+        updated = EditSession(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            channel_id=session.channel_id,
+            message_id=session.message_id,
+            stage=stage,
+            created_at=session.created_at,
+        )
+        self._edit_sessions[session_id] = updated
+        self._save()
+        return updated
+
+    def delete_edit_session(self, session_id: str) -> bool:
+        removed = self._edit_sessions.pop(session_id, None) is not None
+        if removed:
+            self._save()
+        return removed
+
+    def clear_user_edit_sessions(self, user_id: int) -> int:
+        session_ids = [
+            session_id
+            for session_id, session in self._edit_sessions.items()
+            if session.user_id == user_id
+        ]
+        for session_id in session_ids:
+            self._edit_sessions.pop(session_id, None)
+        if session_ids:
+            self._save()
+        return len(session_ids)
+
     def cleanup(self) -> int:
         expired_ids = [draft_id for draft_id, item in self._items.items() if self._is_expired(item)]
         for draft_id in expired_ids:
             self._items.pop(draft_id, None)
-        if expired_ids:
+        expired_session_ids = [
+            session_id
+            for session_id, session in self._edit_sessions.items()
+            if self._is_expired(session)
+        ]
+        for session_id in expired_session_ids:
+            self._edit_sessions.pop(session_id, None)
+        if expired_ids or expired_session_ids:
             self._save()
-        return len(expired_ids)
+        return len(expired_ids) + len(expired_session_ids)
 
-    def _is_expired(self, item: PendingMessage) -> bool:
+    def _is_expired(self, item: PendingMessage | EditSession) -> bool:
         return (time.time() - item.created_at) > self.ttl_seconds
 
     def _load(self) -> None:
@@ -80,6 +188,13 @@ class PendingStore:
             if item is not None:
                 loaded[draft_id] = item
         self._items = loaded
+        edit_sessions = payload.get("edit_sessions", {})
+        loaded_sessions: dict[str, EditSession] = {}
+        for session_id, raw in edit_sessions.items():
+            session = _decode_edit_session(session_id, raw)
+            if session is not None:
+                loaded_sessions[session_id] = session
+        self._edit_sessions = loaded_sessions
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,8 +206,20 @@ class PendingStore:
                     "channel_id": item.channel_id,
                     "markdown": item.markdown,
                     "created_at": item.created_at,
+                    "mode": item.mode,
+                    "target_message_id": item.target_message_id,
                 }
                 for draft_id, item in self._items.items()
+            },
+            "edit_sessions": {
+                session_id: {
+                    "user_id": session.user_id,
+                    "channel_id": session.channel_id,
+                    "message_id": session.message_id,
+                    "stage": session.stage,
+                    "created_at": session.created_at,
+                }
+                for session_id, session in self._edit_sessions.items()
             },
         }
         tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
@@ -111,6 +238,30 @@ def _decode_pending_message(draft_id: str, raw: Any) -> PendingMessage | None:
             channel_id=raw["channel_id"],
             markdown=str(raw["markdown"]),
             created_at=float(raw["created_at"]),
+            mode=str(raw.get("mode", "publish")),
+            target_message_id=_optional_int(raw.get("target_message_id")),
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _decode_edit_session(session_id: str, raw: Any) -> EditSession | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return EditSession(
+            session_id=session_id,
+            user_id=int(raw["user_id"]),
+            channel_id=raw["channel_id"],
+            message_id=int(raw["message_id"]),
+            stage=str(raw["stage"]),
+            created_at=float(raw["created_at"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _optional_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    return int(raw)
