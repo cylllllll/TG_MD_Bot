@@ -40,12 +40,6 @@ TELEGRAM_CHANNEL_ID=-1001234567890
 
 目标频道需要把 bot 加为管理员，并授予发消息权限。
 
-## 安全
-
-- 不要提交 `.env`。仓库只提交 `.env.example`，真实 token 只保存在部署环境。
-- 如果 token 意外提交或泄露，立即去 BotFather revoke 旧 token 并生成新 token。
-- `TELEGRAM_ALLOWED_USER_IDS` 是发送入口白名单；不在白名单内的用户即使私聊 bot 也不会得到预览或发布能力。
-- `data/pending.json` 只保存待确认草稿，默认被 `.gitignore` 排除。
 
 ## Docker 部署
 
@@ -65,22 +59,6 @@ docker compose logs -f md-channel-bot
 docker compose down
 ```
 
-## 发布到 GitHub
-
-提交前确认没有把真实配置带进去：
-
-```bash
-git status --short --ignored
-git check-ignore -v .env data/pending.json
-```
-
-首次推送：
-
-```bash
-git remote add origin https://github.com/cylllllll/TG_MD_Bot.git
-git branch -M main
-git push -u origin main
-```
 
 ## 使用
 
