@@ -10,6 +10,7 @@
 - 使用 Telegram Bot API `sendRichMessage`，请求体中的 `rich_message.markdown` 会原样使用你的 Markdown。
 - 预览消息下方提供 `发送到频道` 和 `取消` 两个 inline keyboard 按钮。
 - 支持用 `/edit` 编辑已经由 bot 发到频道的 Rich Message，更新时调用 Telegram Bot API `editMessageText` 的 `rich_message` 参数。
+- 启动时自动调用 Telegram Bot API `setMyCommands` 注册命令菜单，让客户端展示 `/edit`。
 - 待确认草稿会持久化到 `/data/pending.json`，容器重启后仍可继续处理未过期草稿。
 
 ## 配置
@@ -83,6 +84,16 @@ git push -u origin main
 
 ## 使用
 
+### 命令菜单
+
+bot 启动时会自动注册这些命令：
+
+```text
+/start - 开始使用 bot
+/help - 查看使用说明
+/edit - 编辑频道消息，参数可用 URL 或消息 ID
+```
+
 ### 发布新消息
 
 1. 用白名单用户私聊 bot。
@@ -133,4 +144,4 @@ PYTHONPATH=src python -m unittest discover -s tests
 
 ## API 参考
 
-实现使用的是 Telegram Bot API 的 long polling、`sendRichMessage`、inline keyboard callback 和 `answerCallbackQuery`。
+实现使用的是 Telegram Bot API 的 long polling、`sendRichMessage`、`editMessageText`、`setMyCommands`、inline keyboard callback 和 `answerCallbackQuery`。

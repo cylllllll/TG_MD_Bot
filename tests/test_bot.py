@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from md_channel_bot.bot import MarkdownChannelBot
+from md_channel_bot.bot import BOT_COMMANDS, MarkdownChannelBot
 from md_channel_bot.config import Settings
 from md_channel_bot.store import PendingStore
 
@@ -18,6 +18,7 @@ class FakeClient:
         self.reply_markup_edits: list[dict[str, Any]] = []
         self.copied_messages: list[dict[str, Any]] = []
         self.edited_messages: list[dict[str, Any]] = []
+        self.commands: list[dict[str, str]] | None = None
 
     def send_rich_message(
         self,
@@ -34,6 +35,10 @@ class FakeClient:
         }
         self.rich_messages.append(message)
         return {"message_id": len(self.rich_messages), "chat": {"id": chat_id}}
+
+    def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+        self.commands = commands
+        return True
 
     def copy_message(
         self,
@@ -88,6 +93,23 @@ class FakeClient:
 
 
 class BotTests(unittest.TestCase):
+    def test_register_bot_commands_includes_edit_argument_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = Settings(
+                bot_token="token",
+                allowed_user_ids={42},
+                channel_id=-100123,
+                pending_store_path=str(Path(tmp_dir) / "pending.json"),
+            )
+            client = FakeClient()
+            store = PendingStore(settings.pending_store_path, ttl_seconds=60)
+            bot = MarkdownChannelBot(settings, client, store)  # type: ignore[arg-type]
+
+            bot.register_bot_commands()
+
+            self.assertEqual(client.commands, BOT_COMMANDS)
+            self.assertIn("URL 或消息 ID", client.commands[-1]["description"])
+
     def test_message_creates_preview_and_callback_sends_to_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             settings = Settings(

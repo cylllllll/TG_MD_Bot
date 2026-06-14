@@ -31,6 +31,9 @@ class TelegramClient:
     def delete_webhook(self, drop_pending_updates: bool = False) -> bool:
         return bool(self.request("deleteWebhook", {"drop_pending_updates": drop_pending_updates}))
 
+    def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+        return bool(self.request("setMyCommands", {"commands": commands}))
+
     def get_updates(self, offset: int | None, timeout: int) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": timeout,

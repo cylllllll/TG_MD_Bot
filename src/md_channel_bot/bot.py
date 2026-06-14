@@ -18,6 +18,11 @@ ACTION_UPDATE_EDIT = "update"
 ACTION_CANCEL_EDIT = "ecancel"
 EDIT_STAGE_CONFIRM = "confirm"
 EDIT_STAGE_AWAITING_CONTENT = "awaiting_content"
+BOT_COMMANDS = [
+    {"command": "start", "description": "开始使用 bot"},
+    {"command": "help", "description": "查看使用说明"},
+    {"command": "edit", "description": "编辑频道消息，参数可用 URL 或消息 ID"},
+]
 
 
 class MarkdownChannelBot:
@@ -32,6 +37,7 @@ class MarkdownChannelBot:
 
         me = self.client.get_me()
         logger.info("Bot started as @%s", me.get("username", me.get("id")))
+        self.register_bot_commands()
 
         offset: int | None = None
         while True:
@@ -56,6 +62,12 @@ class MarkdownChannelBot:
             self.handle_message(update["message"])
         elif "callback_query" in update:
             self.handle_callback_query(update["callback_query"])
+
+    def register_bot_commands(self) -> None:
+        try:
+            self.client.set_my_commands(BOT_COMMANDS)
+        except TelegramAPIError:
+            logger.exception("Failed to register bot commands")
 
     def handle_message(self, message: dict[str, Any]) -> None:
         user_id = _message_user_id(message)
