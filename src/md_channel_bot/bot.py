@@ -356,14 +356,13 @@ class MarkdownChannelBot:
         message_id: int,
         fallback_original_markdown: str | None = None,
     ) -> str | None:
-        markdown = self.store.get_published_markdown(self.settings.channel_id, message_id)
-        if markdown is None:
-            markdown = self._fetch_original_markdown_via_forward(chat_id, message_id)
-            if markdown:
-                self.store.record_published_message(self.settings.channel_id, message_id, markdown)
-        if markdown is None and fallback_original_markdown:
-            markdown = fallback_original_markdown
-        return markdown
+        markdown, allow_fallback = self._fetch_original_markdown_via_forward(chat_id, message_id)
+        if markdown:
+            return markdown
+
+        if allow_fallback and fallback_original_markdown:
+            return fallback_original_markdown
+        return None
 
     def _send_original_markdown_edit_message(self, chat_id: int | str, session_id: str, markdown: str) -> None:
         chunks = _original_markdown_messages(markdown)
@@ -375,7 +374,7 @@ class MarkdownChannelBot:
                 reply_markup=_edit_keyboard(session_id) if index == 0 else None,
             )
 
-    def _fetch_original_markdown_via_forward(self, chat_id: int | str, message_id: int) -> str | None:
+    def _fetch_original_markdown_via_forward(self, chat_id: int | str, message_id: int) -> tuple[str | None, bool]:
         try:
             message = self.client.forward_message(
                 chat_id=chat_id,
@@ -385,7 +384,7 @@ class MarkdownChannelBot:
             )
         except TelegramAPIError as exc:
             logger.warning("Failed to forward channel message %s for rich source: %s", message_id, exc)
-            return None
+            return None, True
 
         forwarded_message_id = _response_message_id(message)
         if forwarded_message_id is not None:
@@ -394,7 +393,7 @@ class MarkdownChannelBot:
             except TelegramAPIError:
                 logger.exception("Failed to delete temporary forwarded message %s", forwarded_message_id)
 
-        return _message_to_source_markdown(message)
+        return _message_to_source_markdown(message), _message_has_rich_message(message)
 
     def _extract_markdown(self, message: dict[str, Any]) -> str:
         text = message.get("text")
@@ -580,15 +579,11 @@ def _message_to_source_markdown(message: dict[str, Any]) -> str | None:
         if markdown:
             return markdown
 
-    text = message.get("text")
-    if isinstance(text, str) and text.strip():
-        return text
-
-    caption = message.get("caption")
-    if isinstance(caption, str) and caption.strip():
-        return caption
-
     return None
+
+
+def _message_has_rich_message(message: dict[str, Any]) -> bool:
+    return isinstance(message.get("rich_message"), dict)
 
 
 def _rich_message_to_source_markdown(rich_message: dict[str, Any]) -> str | None:

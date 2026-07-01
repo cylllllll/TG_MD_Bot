@@ -256,10 +256,9 @@ class BotTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(client.copied_messages, [])
-            self.assertEqual(client.text_messages[-1]["text"], "<pre># Original\n\nold body</pre>")
-            self.assertEqual(client.text_messages[-1]["parse_mode"], "HTML")
-            edit_data = client.text_messages[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 777)
+            self.assertEqual(len(client.copied_messages), 1)
+            edit_data = client.copied_messages[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
 
             bot.handle_callback_query(
                 {
@@ -404,10 +403,74 @@ class BotTests(unittest.TestCase):
             )
             self.assertEqual(client.text_messages[-1]["parse_mode"], "HTML")
             self.assertIsNotNone(client.text_messages[-1]["reply_markup"])
-            self.assertEqual(
-                store.get_published_markdown(-1001326206584, 777),
-                '<blockquote>第一段\n\n第二段\n<cite><a href="https://example.com">Source</a></cite></blockquote>',
+            self.assertIsNone(store.get_published_markdown(-1001326206584, 777))
+
+    def test_edit_command_copies_forwarded_non_rich_message_with_caption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = Settings(
+                bot_token="token",
+                allowed_user_ids={42},
+                channel_id=-1001326206584,
+                pending_store_path=str(Path(tmp_dir) / "pending.json"),
             )
+            client = FakeClient()
+            client.forward_message_results[6586] = {
+                "message_id": 88,
+                "photo": [{"file_id": "photo-id", "width": 1179, "height": 662}],
+                "caption": "普通图片消息说明",
+            }
+            store = PendingStore(settings.pending_store_path, ttl_seconds=60)
+            bot = MarkdownChannelBot(settings, client, store)  # type: ignore[arg-type]
+
+            bot.handle_message(
+                {
+                    "message_id": 10,
+                    "from": {"id": 42},
+                    "chat": {"id": 42},
+                    "text": "/edit https://t.me/c/1326206584/6586",
+                }
+            )
+
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 6586)
+            self.assertEqual(client.deleted_messages[-1], {"chat_id": 42, "message_id": 88})
+            self.assertEqual(client.text_messages, [])
+            self.assertEqual(len(client.copied_messages), 1)
+            self.assertEqual(client.copied_messages[0]["message_id"], 6586)
+            self.assertIsNotNone(client.copied_messages[0]["reply_markup"])
+            self.assertIsNone(store.get_published_markdown(-1001326206584, 6586))
+
+    def test_edit_command_ignores_recorded_markdown_when_forwarded_message_is_not_rich(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = Settings(
+                bot_token="token",
+                allowed_user_ids={42},
+                channel_id=-1001326206584,
+                pending_store_path=str(Path(tmp_dir) / "pending.json"),
+            )
+            client = FakeClient()
+            client.forward_message_results[6586] = {
+                "message_id": 88,
+                "photo": [{"file_id": "photo-id", "width": 1179, "height": 662}],
+                "caption": "普通图片消息说明",
+            }
+            store = PendingStore(settings.pending_store_path, ttl_seconds=60)
+            store.record_published_message(-1001326206584, 6586, "旧版本误缓存的 caption")
+            bot = MarkdownChannelBot(settings, client, store)  # type: ignore[arg-type]
+
+            bot.handle_message(
+                {
+                    "message_id": 10,
+                    "from": {"id": 42},
+                    "chat": {"id": 42},
+                    "text": "/edit https://t.me/c/1326206584/6586",
+                }
+            )
+
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 6586)
+            self.assertEqual(client.deleted_messages[-1], {"chat_id": 42, "message_id": 88})
+            self.assertEqual(client.text_messages, [])
+            self.assertEqual(len(client.copied_messages), 1)
+            self.assertEqual(store.get_published_markdown(-1001326206584, 6586), "旧版本误缓存的 caption")
 
     def test_recent_command_starts_edit_for_latest_recorded_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -437,10 +500,10 @@ class BotTests(unittest.TestCase):
                 client.text_messages[0]["text"],
                 "读取当前频道信息失败：not configured 已改用本地记录的最近消息 ID：15",
             )
-            self.assertEqual(client.copied_messages, [])
-            self.assertEqual(client.text_messages[-1]["text"], "<pre># Latest</pre>")
-            self.assertEqual(client.text_messages[-1]["parse_mode"], "HTML")
-            self.assertIsNotNone(client.text_messages[-1]["reply_markup"])
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 15)
+            self.assertEqual(len(client.copied_messages), 1)
+            self.assertEqual(client.copied_messages[-1]["message_id"], 15)
+            self.assertIsNotNone(client.copied_messages[-1]["reply_markup"])
 
     def test_recent_command_fetches_latest_id_from_configured_public_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -467,10 +530,10 @@ class BotTests(unittest.TestCase):
             )
 
             self.assertEqual(client.public_latest_requests, ["PlayStationNewssss"])
-            self.assertEqual(client.copied_messages, [])
-            self.assertEqual(client.text_messages[0]["text"], "<pre># Latest from web</pre>")
-            self.assertEqual(client.text_messages[0]["parse_mode"], "HTML")
-            self.assertIsNotNone(client.text_messages[0]["reply_markup"])
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 18)
+            self.assertEqual(len(client.copied_messages), 1)
+            self.assertEqual(client.copied_messages[-1]["message_id"], 18)
+            self.assertIsNotNone(client.copied_messages[-1]["reply_markup"])
 
     def test_recent_command_uses_public_html_when_original_markdown_is_not_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -505,6 +568,45 @@ class BotTests(unittest.TestCase):
             )
             self.assertEqual(client.text_messages[0]["parse_mode"], "HTML")
             self.assertIsNotNone(client.text_messages[0]["reply_markup"])
+
+    def test_recent_command_ignores_public_html_when_forwarded_message_is_not_rich(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = Settings(
+                bot_token="token",
+                allowed_user_ids={42},
+                channel_id=-100123,
+                pending_store_path=str(Path(tmp_dir) / "pending.json"),
+            )
+            client = FakeClient()
+            client.chats[-100123] = {"id": -100123, "username": "PlayStationNewssss"}
+            client.public_latest_messages["PlayStationNewssss"] = PublicChannelMessage(
+                message_id=6586,
+                html="<blockquote>网页兜底内容</blockquote>",
+            )
+            client.forward_message_results[6586] = {
+                "message_id": 88,
+                "photo": [{"file_id": "photo-id", "width": 1179, "height": 662}],
+                "caption": "普通图片消息说明",
+            }
+            store = PendingStore(settings.pending_store_path, ttl_seconds=60)
+            bot = MarkdownChannelBot(settings, client, store)  # type: ignore[arg-type]
+
+            bot.handle_message(
+                {
+                    "message_id": 10,
+                    "from": {"id": 42},
+                    "chat": {"id": 42},
+                    "text": "/recent",
+                }
+            )
+
+            self.assertEqual(client.public_latest_requests, ["PlayStationNewssss"])
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 6586)
+            self.assertEqual(client.deleted_messages[-1], {"chat_id": 42, "message_id": 88})
+            self.assertEqual(client.text_messages, [])
+            self.assertEqual(len(client.copied_messages), 1)
+            self.assertEqual(client.copied_messages[0]["message_id"], 6586)
+            self.assertIsNotNone(client.copied_messages[0]["reply_markup"])
 
     def test_recent_command_requires_recorded_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
