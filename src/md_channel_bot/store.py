@@ -30,12 +30,21 @@ class EditSession:
     created_at: float
 
 
+@dataclass(frozen=True)
+class PublishedMessage:
+    channel_id: int | str
+    message_id: int
+    markdown: str
+    updated_at: float
+
+
 class PendingStore:
     def __init__(self, path: str, ttl_seconds: int) -> None:
         self.path = Path(path)
         self.ttl_seconds = ttl_seconds
         self._items: dict[str, PendingMessage] = {}
         self._edit_sessions: dict[str, EditSession] = {}
+        self._published_messages: dict[str, PublishedMessage] = {}
         self._load()
         self.cleanup()
 
@@ -158,6 +167,36 @@ class PendingStore:
             self._save()
         return len(session_ids)
 
+    def record_published_message(
+        self,
+        channel_id: int | str,
+        message_id: int,
+        markdown: str,
+    ) -> PublishedMessage:
+        item = PublishedMessage(
+            channel_id=channel_id,
+            message_id=message_id,
+            markdown=markdown,
+            updated_at=time.time(),
+        )
+        self._published_messages[_published_message_key(channel_id, message_id)] = item
+        self._save()
+        return item
+
+    def get_published_markdown(self, channel_id: int | str, message_id: int) -> str | None:
+        item = self._published_messages.get(_published_message_key(channel_id, message_id))
+        return item.markdown if item is not None else None
+
+    def get_latest_published_message(self, channel_id: int | str) -> PublishedMessage | None:
+        messages = [
+            item
+            for item in self._published_messages.values()
+            if item.channel_id == channel_id
+        ]
+        if not messages:
+            return None
+        return max(messages, key=lambda item: item.message_id)
+
     def cleanup(self) -> int:
         expired_ids = [draft_id for draft_id, item in self._items.items() if self._is_expired(item)]
         for draft_id in expired_ids:
@@ -195,6 +234,13 @@ class PendingStore:
             if session is not None:
                 loaded_sessions[session_id] = session
         self._edit_sessions = loaded_sessions
+        published_messages = payload.get("published_messages", {})
+        loaded_published: dict[str, PublishedMessage] = {}
+        for raw in published_messages.values():
+            item = _decode_published_message(raw)
+            if item is not None:
+                loaded_published[_published_message_key(item.channel_id, item.message_id)] = item
+        self._published_messages = loaded_published
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +266,15 @@ class PendingStore:
                     "created_at": session.created_at,
                 }
                 for session_id, session in self._edit_sessions.items()
+            },
+            "published_messages": {
+                key: {
+                    "channel_id": item.channel_id,
+                    "message_id": item.message_id,
+                    "markdown": item.markdown,
+                    "updated_at": item.updated_at,
+                }
+                for key, item in self._published_messages.items()
             },
         }
         tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
@@ -261,7 +316,25 @@ def _decode_edit_session(session_id: str, raw: Any) -> EditSession | None:
         return None
 
 
+def _decode_published_message(raw: Any) -> PublishedMessage | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return PublishedMessage(
+            channel_id=raw["channel_id"],
+            message_id=int(raw["message_id"]),
+            markdown=str(raw["markdown"]),
+            updated_at=float(raw["updated_at"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _optional_int(raw: Any) -> int | None:
     if raw is None:
         return None
     return int(raw)
+
+
+def _published_message_key(channel_id: int | str, message_id: int) -> str:
+    return f"{channel_id}:{message_id}"

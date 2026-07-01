@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from html import escape
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,10 +19,12 @@ ACTION_UPDATE_EDIT = "update"
 ACTION_CANCEL_EDIT = "ecancel"
 EDIT_STAGE_CONFIRM = "confirm"
 EDIT_STAGE_AWAITING_CONTENT = "awaiting_content"
+TEXT_MESSAGE_CHUNK_LIMIT = 3800
 BOT_COMMANDS = [
     {"command": "start", "description": "开始使用 bot"},
     {"command": "help", "description": "查看使用说明"},
     {"command": "edit", "description": "编辑频道消息，参数可用 URL 或消息 ID"},
+    {"command": "recent", "description": "编辑当前频道最新消息"},
 ]
 
 
@@ -201,10 +204,13 @@ class MarkdownChannelBot:
                 chat_id,
                 "发送 Markdown 文本或 .md/.markdown/.txt 文件，我会用 sendRichMessage 生成预览。"
                 "确认无误后点击“发送到频道”，或点击“取消”。\n\n"
-                "编辑已发布消息：发送 /edit 频道消息链接 或 /edit 消息ID。",
+                "编辑已发布消息：发送 /edit 频道消息链接 或 /edit 消息ID。\n"
+                "快速编辑当前频道最新消息：发送 /recent。",
             )
         elif command == "/edit":
             self._handle_edit_command(chat_id, user_id, argument)
+        elif command == "/recent":
+            self._handle_recent_command(chat_id, user_id)
         else:
             self._safe_send_text(chat_id, "未知命令。发送 /help 查看用法。")
 
@@ -215,7 +221,63 @@ class MarkdownChannelBot:
             self._safe_send_text(chat_id, str(exc))
             return
 
+        self._start_edit_session(chat_id, user_id, target_message_id)
+
+    def _handle_recent_command(self, chat_id: int | str, user_id: int) -> None:
+        try:
+            latest_message_id, public_html = self._get_public_channel_latest_message()
+        except UserFacingError as exc:
+            latest = self.store.get_latest_published_message(self.settings.channel_id)
+            if latest is None:
+                self._safe_send_text(chat_id, f"{exc} 也没有本地已记录消息可兜底，请用 /edit 消息ID。")
+                return
+
+            self._safe_send_text(chat_id, f"{exc} 已改用本地记录的最近消息 ID：{latest.message_id}")
+            self._start_edit_session(chat_id, user_id, latest.message_id)
+            return
+
+        self._start_edit_session(chat_id, user_id, latest_message_id, fallback_original_markdown=public_html)
+
+    def _get_public_channel_latest_message(self) -> tuple[int, str | None]:
+        username = self._get_configured_channel_username()
+        try:
+            message = self.client.get_public_channel_latest_message(username)
+        except TelegramAPIError as exc:
+            raise UserFacingError(f"获取公开频道最新消息 ID 失败：{exc.description}") from exc
+        return message.message_id, message.html
+
+    def _get_configured_channel_username(self) -> str:
+        if isinstance(self.settings.channel_id, str) and self.settings.channel_id.startswith("@"):
+            return self.settings.channel_id[1:]
+
+        try:
+            chat = self.client.get_chat(self.settings.channel_id)
+        except TelegramAPIError as exc:
+            raise UserFacingError(f"读取当前频道信息失败：{exc.description}") from exc
+
+        username = chat.get("username")
+        if isinstance(username, str) and username:
+            return username
+        raise UserFacingError("当前配置频道没有公开 username，无法通过公开链接获取最新消息 ID。")
+
+    def _start_edit_session(
+        self,
+        chat_id: int | str,
+        user_id: int,
+        target_message_id: int,
+        fallback_original_markdown: str | None = None,
+    ) -> None:
         session = self.store.create_edit_session(user_id, self.settings.channel_id, target_message_id)
+        markdown = self._resolve_original_markdown(chat_id, target_message_id, fallback_original_markdown)
+        if markdown is not None:
+            try:
+                self._send_original_markdown_edit_message(chat_id, session.session_id, markdown)
+            except TelegramAPIError as exc:
+                self.store.delete_edit_session(session.session_id)
+                logger.warning("Failed to send original markdown edit message %s: %s", target_message_id, exc)
+                self._safe_send_text(chat_id, f"发送原始内容失败：{exc.description}")
+            return
+
         try:
             self.client.copy_message(
                 chat_id=chat_id,
@@ -227,6 +289,7 @@ class MarkdownChannelBot:
             self.store.delete_edit_session(session.session_id)
             logger.warning("Failed to copy channel message %s: %s", target_message_id, exc)
             self._safe_send_text(chat_id, f"读取频道消息失败：{exc.description}")
+            return
 
     def _handle_edit_session_callback(
         self,
@@ -287,6 +350,52 @@ class MarkdownChannelBot:
             return
         self.store.delete_edit_session(edit_session.session_id)
 
+    def _resolve_original_markdown(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        fallback_original_markdown: str | None = None,
+    ) -> str | None:
+        markdown = self.store.get_published_markdown(self.settings.channel_id, message_id)
+        if markdown is None:
+            markdown = self._fetch_original_markdown_via_forward(chat_id, message_id)
+            if markdown:
+                self.store.record_published_message(self.settings.channel_id, message_id, markdown)
+        if markdown is None and fallback_original_markdown:
+            markdown = fallback_original_markdown
+        return markdown
+
+    def _send_original_markdown_edit_message(self, chat_id: int | str, session_id: str, markdown: str) -> None:
+        chunks = _original_markdown_messages(markdown)
+        for index, text in enumerate(chunks):
+            self.client.send_text(
+                chat_id=chat_id,
+                text=_monospace_message(text),
+                parse_mode="HTML",
+                reply_markup=_edit_keyboard(session_id) if index == 0 else None,
+            )
+
+    def _fetch_original_markdown_via_forward(self, chat_id: int | str, message_id: int) -> str | None:
+        try:
+            message = self.client.forward_message(
+                chat_id=chat_id,
+                from_chat_id=self.settings.channel_id,
+                message_id=message_id,
+                disable_notification=True,
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Failed to forward channel message %s for rich source: %s", message_id, exc)
+            return None
+
+        forwarded_message_id = _response_message_id(message)
+        if forwarded_message_id is not None:
+            try:
+                self.client.delete_message(chat_id=chat_id, message_id=forwarded_message_id)
+            except TelegramAPIError:
+                logger.exception("Failed to delete temporary forwarded message %s", forwarded_message_id)
+
+        return _message_to_source_markdown(message)
+
     def _extract_markdown(self, message: dict[str, Any]) -> str:
         text = message.get("text")
         if isinstance(text, str) and text.strip():
@@ -332,10 +441,13 @@ class MarkdownChannelBot:
         return markdown
 
     def _send_pending_to_channel(self, pending: PendingMessage) -> None:
-        self.client.send_rich_message(
+        result = self.client.send_rich_message(
             chat_id=pending.channel_id,
             markdown=pending.markdown,
         )
+        message_id = _response_message_id(result)
+        if message_id is not None:
+            self.store.record_published_message(pending.channel_id, message_id, pending.markdown)
 
     def _update_channel_message(self, pending: PendingMessage) -> None:
         if pending.target_message_id is None:
@@ -345,6 +457,7 @@ class MarkdownChannelBot:
             message_id=pending.target_message_id,
             markdown=pending.markdown,
         )
+        self.store.record_published_message(pending.channel_id, pending.target_message_id, pending.markdown)
 
     def _remove_preview_buttons(self, chat_id: int | str | None, message_id: int | None) -> None:
         if chat_id is None or not isinstance(message_id, int):
@@ -359,9 +472,10 @@ class MarkdownChannelBot:
         chat_id: int | str,
         text: str,
         reply_to_message_id: int | None = None,
+        parse_mode: str | None = None,
     ) -> None:
         try:
-            self.client.send_text(chat_id, text, reply_to_message_id=reply_to_message_id)
+            self.client.send_text(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode=parse_mode)
         except TelegramAPIError:
             logger.exception("Failed to send text response")
 
@@ -435,6 +549,103 @@ def _update_keyboard(draft_id: str) -> dict[str, Any]:
     }
 
 
+def _original_markdown_messages(markdown: str) -> list[str]:
+    chunks: list[str] = []
+    remaining = markdown
+    while remaining:
+        chunk, remaining = _take_text_chunk(remaining, TEXT_MESSAGE_CHUNK_LIMIT)
+        chunks.append(chunk)
+    return chunks or [""]
+
+
+def _monospace_message(text: str) -> str:
+    return f"<pre>{escape(text, quote=False)}</pre>"
+
+
+def _take_text_chunk(text: str, size: int) -> tuple[str, str]:
+    if len(text) <= size:
+        return text, ""
+    newline_index = text.rfind("\n", 0, size + 1)
+    if newline_index > 0:
+        split_at = newline_index + 1
+    else:
+        split_at = size
+    return text[:split_at], text[split_at:]
+
+
+def _message_to_source_markdown(message: dict[str, Any]) -> str | None:
+    rich_message = message.get("rich_message")
+    if isinstance(rich_message, dict):
+        markdown = _rich_message_to_source_markdown(rich_message)
+        if markdown:
+            return markdown
+
+    text = message.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+
+    caption = message.get("caption")
+    if isinstance(caption, str) and caption.strip():
+        return caption
+
+    return None
+
+
+def _rich_message_to_source_markdown(rich_message: dict[str, Any]) -> str | None:
+    blocks = rich_message.get("blocks")
+    if not isinstance(blocks, list):
+        return None
+    return _join_rich_blocks(blocks)
+
+
+def _join_rich_blocks(blocks: list[Any]) -> str | None:
+    rendered = [_rich_block_to_source_markdown(block) for block in blocks]
+    rendered = [item for item in rendered if item]
+    return "\n\n".join(rendered) if rendered else None
+
+
+def _rich_block_to_source_markdown(block: Any) -> str | None:
+    if not isinstance(block, dict):
+        return None
+
+    block_type = block.get("type")
+    if block_type == "paragraph":
+        return _rich_text_to_source(block.get("text"))
+
+    if block_type == "blockquote":
+        inner_blocks = block.get("blocks")
+        inner = _join_rich_blocks(inner_blocks) if isinstance(inner_blocks, list) else None
+        credit = _rich_credit_to_source_markdown(block.get("credit"))
+        parts = [part for part in [inner, credit] if part]
+        if not parts:
+            return None
+        return f"<blockquote>{'\n'.join(parts)}</blockquote>"
+
+    text = _rich_text_to_source(block.get("text"))
+    return text if text else None
+
+
+def _rich_credit_to_source_markdown(credit: Any) -> str | None:
+    if not isinstance(credit, dict):
+        return None
+    text = _rich_text_to_source(credit.get("text"))
+    if not text:
+        return None
+    if credit.get("type") == "url":
+        url = credit.get("url")
+        if isinstance(url, str) and url:
+            return f'<cite><a href="{escape(url, quote=True)}">{text}</a></cite>'
+    return f"<cite>{text}</cite>"
+
+
+def _rich_text_to_source(text: Any) -> str | None:
+    if not isinstance(text, str):
+        return None
+    if not text.strip():
+        return None
+    return escape(text, quote=False)
+
+
 def _looks_like_markdown_file(filename: str, mime_type: str) -> bool:
     lowered = filename.lower()
     if lowered.endswith((".md", ".markdown", ".txt")):
@@ -486,6 +697,13 @@ def _parse_message_id(raw: str) -> int:
     if message_id <= 0:
         raise UserFacingError("消息 ID 必须大于 0。")
     return message_id
+
+
+def _response_message_id(result: Any) -> int | None:
+    if not isinstance(result, dict):
+        return None
+    message_id = result.get("message_id")
+    return message_id if isinstance(message_id, int) else None
 
 
 def _matches_private_channel_link(configured_channel_id: int | str, internal_id: str) -> bool:
