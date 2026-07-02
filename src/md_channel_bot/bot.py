@@ -168,14 +168,16 @@ class MarkdownChannelBot:
                 self.client.answer_callback_query(callback_id, "草稿类型不匹配。", show_alert=True)
                 return
             try:
-                self._send_pending_to_channel(pending)
+                channel_message_id = self._send_pending_to_channel(pending)
             except TelegramAPIError as exc:
                 logger.warning("Failed to send pending message %s: %s", draft_id, exc)
                 self.client.answer_callback_query(callback_id, f"发送失败：{exc.description}", show_alert=True)
                 return
 
             self.store.delete(draft_id)
-            self._remove_preview_buttons(preview_chat_id, preview_message_id)
+            self._delete_preview_message(preview_chat_id, preview_message_id)
+            if channel_message_id is not None:
+                self._forward_channel_message(preview_chat_id or user_id, channel_message_id)
             self.client.answer_callback_query(callback_id, "已发送到频道。")
             return
 
@@ -184,14 +186,15 @@ class MarkdownChannelBot:
                 self.client.answer_callback_query(callback_id, "草稿类型不匹配。", show_alert=True)
                 return
             try:
-                self._update_channel_message(pending)
+                channel_message_id = self._update_channel_message(pending)
             except TelegramAPIError as exc:
                 logger.warning("Failed to update pending message %s: %s", draft_id, exc)
                 self.client.answer_callback_query(callback_id, f"更新失败：{exc.description}", show_alert=True)
                 return
 
             self.store.delete(draft_id)
-            self._remove_preview_buttons(preview_chat_id, preview_message_id)
+            self._delete_preview_message(preview_chat_id, preview_message_id)
+            self._forward_channel_message(preview_chat_id or user_id, channel_message_id)
             self.client.answer_callback_query(callback_id, "已更新频道消息。")
             return
 
@@ -439,7 +442,7 @@ class MarkdownChannelBot:
             raise UserFacingError("文件内容为空。")
         return markdown
 
-    def _send_pending_to_channel(self, pending: PendingMessage) -> None:
+    def _send_pending_to_channel(self, pending: PendingMessage) -> int | None:
         result = self.client.send_rich_message(
             chat_id=pending.channel_id,
             markdown=pending.markdown,
@@ -447,8 +450,9 @@ class MarkdownChannelBot:
         message_id = _response_message_id(result)
         if message_id is not None:
             self.store.record_published_message(pending.channel_id, message_id, pending.markdown)
+        return message_id
 
-    def _update_channel_message(self, pending: PendingMessage) -> None:
+    def _update_channel_message(self, pending: PendingMessage) -> int:
         if pending.target_message_id is None:
             raise ValueError("target_message_id is required for edit drafts")
         self.client.edit_message_text(
@@ -457,6 +461,28 @@ class MarkdownChannelBot:
             markdown=pending.markdown,
         )
         self.store.record_published_message(pending.channel_id, pending.target_message_id, pending.markdown)
+        return pending.target_message_id
+
+    def _delete_preview_message(self, chat_id: int | str | None, message_id: int | None) -> None:
+        if chat_id is None or not isinstance(message_id, int):
+            return
+        try:
+            self.client.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramAPIError:
+            logger.exception("Failed to delete preview message %s", message_id)
+            self._remove_preview_buttons(chat_id, message_id)
+
+    def _forward_channel_message(self, chat_id: int | str, message_id: int) -> None:
+        try:
+            self.client.forward_message(
+                chat_id=chat_id,
+                from_chat_id=self.settings.channel_id,
+                message_id=message_id,
+                disable_notification=True,
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Failed to forward channel message %s after delivery: %s", message_id, exc)
+            self._safe_send_text(chat_id, f"频道消息已处理成功，但转发展示失败：{exc.description}")
 
     def _remove_preview_buttons(self, chat_id: int | str | None, message_id: int | None) -> None:
         if chat_id is None or not isinstance(message_id, int):

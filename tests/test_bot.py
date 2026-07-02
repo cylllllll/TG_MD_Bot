@@ -200,6 +200,7 @@ class BotTests(unittest.TestCase):
             self.assertEqual(client.rich_messages[0]["chat_id"], 42)
             keyboard = client.rich_messages[0]["reply_markup"]["inline_keyboard"][0]
             send_data = keyboard[0]["callback_data"]
+            client.forward_message_results[2] = {"message_id": 88}
 
             bot.handle_callback_query(
                 {
@@ -215,7 +216,16 @@ class BotTests(unittest.TestCase):
             self.assertEqual(client.rich_messages[1]["markdown"], "# Hello")
             self.assertEqual(store.get_published_markdown(-100123, 2), "# Hello")
             self.assertEqual(client.callback_answers[-1]["text"], "已发送到频道。")
-            self.assertEqual(client.reply_markup_edits[-1]["reply_markup"], {"inline_keyboard": []})
+            self.assertEqual(client.deleted_messages[-1], {"chat_id": 42, "message_id": 2})
+            self.assertEqual(
+                client.forwarded_messages[-1],
+                {
+                    "chat_id": 42,
+                    "from_chat_id": -100123,
+                    "message_id": 2,
+                    "disable_notification": True,
+                },
+            )
 
     def test_unauthorized_user_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -284,6 +294,7 @@ class BotTests(unittest.TestCase):
             self.assertEqual(len(client.rich_messages), 1)
             self.assertEqual(client.rich_messages[0]["markdown"], "# Updated\n\nnew body")
             update_data = client.rich_messages[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+            client.forward_message_results[777] = {"message_id": 99}
 
             bot.handle_callback_query(
                 {
@@ -305,6 +316,16 @@ class BotTests(unittest.TestCase):
             )
             self.assertEqual(client.callback_answers[-1]["text"], "已更新频道消息。")
             self.assertEqual(store.get_published_markdown(-1001326206584, 777), "# Updated\n\nnew body")
+            self.assertEqual(client.deleted_messages[-1], {"chat_id": 42, "message_id": 13})
+            self.assertEqual(
+                client.forwarded_messages[-1],
+                {
+                    "chat_id": 42,
+                    "from_chat_id": -1001326206584,
+                    "message_id": 777,
+                    "disable_notification": True,
+                },
+            )
 
     def test_edit_command_rejects_wrong_private_channel_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
