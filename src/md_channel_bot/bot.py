@@ -607,6 +607,9 @@ def _rich_block_to_source_markdown(block: Any) -> str | None:
     if block_type == "paragraph":
         return _rich_text_to_source(block.get("text"))
 
+    if block_type == "heading":
+        return _rich_heading_to_source_markdown(block)
+
     if block_type == "blockquote":
         inner_blocks = block.get("blocks")
         inner = _join_rich_blocks(inner_blocks) if isinstance(inner_blocks, list) else None
@@ -616,8 +619,33 @@ def _rich_block_to_source_markdown(block: Any) -> str | None:
             return None
         return f"<blockquote>{'\n'.join(parts)}</blockquote>"
 
+    if block_type == "details":
+        return _rich_details_to_source_markdown(block)
+
     text = _rich_text_to_source(block.get("text"))
     return text if text else None
+
+
+def _rich_heading_to_source_markdown(block: dict[str, Any]) -> str | None:
+    text = _rich_text_to_source(block.get("text"))
+    if not text:
+        return None
+
+    size = block.get("size")
+    if not isinstance(size, int) or size < 1 or size > 6:
+        size = 1
+    return f"<h{size}>{text}</h{size}>"
+
+
+def _rich_details_to_source_markdown(block: dict[str, Any]) -> str | None:
+    summary = _rich_text_to_source(block.get("summary"))
+    inner_blocks = block.get("blocks")
+    inner = _join_rich_blocks(inner_blocks) if isinstance(inner_blocks, list) else None
+    if not summary or not inner:
+        return None
+
+    open_attr = " open" if block.get("is_open") is True else ""
+    return f"<details{open_attr}><summary>{summary}</summary>\n{inner}\n</details>"
 
 
 def _rich_credit_to_source_markdown(credit: Any) -> str | None:

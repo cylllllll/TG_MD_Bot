@@ -405,6 +405,67 @@ class BotTests(unittest.TestCase):
             self.assertIsNotNone(client.text_messages[-1]["reply_markup"])
             self.assertIsNone(store.get_published_markdown(-1001326206584, 777))
 
+    def test_edit_command_preserves_heading_and_details_from_forwarded_rich_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = Settings(
+                bot_token="token",
+                allowed_user_ids={42},
+                channel_id=-1001326206584,
+                pending_store_path=str(Path(tmp_dir) / "pending.json"),
+            )
+            client = FakeClient()
+            client.forward_message_results[6589] = {
+                "message_id": 88,
+                "rich_message": {
+                    "blocks": [
+                        {"type": "heading", "text": "PlayStation 宣布", "size": 2},
+                        {
+                            "type": "blockquote",
+                            "blocks": [
+                                {"type": "paragraph", "text": "正文第一段"},
+                                {
+                                    "type": "details",
+                                    "summary": "点击展开长文本",
+                                    "blocks": [
+                                        {"type": "paragraph", "text": "展开第一段"},
+                                        {"type": "paragraph", "text": "展开第二段"},
+                                    ],
+                                },
+                            ],
+                            "credit": {
+                                "type": "url",
+                                "text": "PlayStation Blog",
+                                "url": "https://example.com/post",
+                            },
+                        },
+                    ]
+                },
+            }
+            store = PendingStore(settings.pending_store_path, ttl_seconds=60)
+            bot = MarkdownChannelBot(settings, client, store)  # type: ignore[arg-type]
+
+            bot.handle_message(
+                {
+                    "message_id": 10,
+                    "from": {"id": 42},
+                    "chat": {"id": 42},
+                    "text": "/edit https://t.me/c/1326206584/6589",
+                }
+            )
+
+            self.assertEqual(client.forwarded_messages[-1]["message_id"], 6589)
+            self.assertEqual(client.copied_messages, [])
+            self.assertEqual(
+                client.text_messages[-1]["text"],
+                '<pre>&lt;h2&gt;PlayStation 宣布&lt;/h2&gt;\n\n'
+                '&lt;blockquote&gt;正文第一段\n\n'
+                '&lt;details&gt;&lt;summary&gt;点击展开长文本&lt;/summary&gt;\n'
+                '展开第一段\n\n'
+                '展开第二段\n'
+                '&lt;/details&gt;\n'
+                '&lt;cite&gt;&lt;a href="https://example.com/post"&gt;PlayStation Blog&lt;/a&gt;&lt;/cite&gt;&lt;/blockquote&gt;</pre>',
+            )
+
     def test_edit_command_copies_forwarded_non_rich_message_with_caption(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             settings = Settings(
